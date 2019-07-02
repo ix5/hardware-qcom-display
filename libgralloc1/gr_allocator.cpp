@@ -27,7 +27,7 @@
  * IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#include <log/log.h>
+#include <cutils/log.h>
 #include <algorithm>
 #include <vector>
 
@@ -62,11 +62,7 @@
 #define ION_SC_PREVIEW_FLAGS (ION_SECURE | ION_FLAG_CP_CAMERA_PREVIEW)
 #else  // SLAVE_SIDE_CP
 #define CP_HEAP_ID ION_CP_MM_HEAP_ID
-#ifdef USE_SECURE_HEAP
-#define SD_HEAP_ID ION_SECURE_DISPLAY_HEAP_ID
-#else
-#define SD_HEAP_ID ION_CP_MM_HEAP_ID
-#endif
+#define SD_HEAP_ID CP_HEAP_ID
 #define ION_CP_FLAGS (ION_SECURE | ION_FLAG_ALLOW_NON_CONTIG)
 #define ION_SD_FLAGS ION_SECURE
 #define ION_SC_FLAGS ION_SECURE
@@ -76,7 +72,7 @@
 using std::vector;
 using std::shared_ptr;
 
-namespace gralloc {
+namespace gralloc1 {
 
 static BufferInfo GetBufferInfo(const BufferDescriptor &descriptor) {
   return BufferInfo(descriptor.GetWidth(), descriptor.GetHeight(), descriptor.GetFormat(),
@@ -203,7 +199,18 @@ int Allocator::GetImplDefinedFormat(gralloc1_producer_usage_t prod_usage,
   if (format == HAL_PIXEL_FORMAT_IMPLEMENTATION_DEFINED ||
       format == HAL_PIXEL_FORMAT_YCbCr_420_888) {
     if (prod_usage & GRALLOC1_PRODUCER_USAGE_PRIVATE_ALLOC_UBWC) {
-      gr_format = HAL_PIXEL_FORMAT_YCbCr_420_SP_VENUS_UBWC;
+      // Use of 10BIT_TP and 10BIT bits is supposed to be mutually exclusive.
+      // Each bit maps to only one format. Here we will check one of the bits
+      // and ignore the other.
+      if (prod_usage & GRALLOC1_PRODUCER_USAGE_PRIVATE_10BIT_TP) {
+        gr_format = HAL_PIXEL_FORMAT_YCbCr_420_TP10_UBWC;
+      } else if (prod_usage & GRALLOC1_PRODUCER_USAGE_PRIVATE_10BIT) {
+        gr_format = HAL_PIXEL_FORMAT_YCbCr_420_P010_UBWC;
+      } else {
+        gr_format = HAL_PIXEL_FORMAT_YCbCr_420_SP_VENUS_UBWC;
+      }
+    } else if (prod_usage & GRALLOC1_PRODUCER_USAGE_PRIVATE_10BIT) {
+      gr_format = HAL_PIXEL_FORMAT_YCbCr_420_P010_VENUS;
     } else if (cons_usage & GRALLOC1_CONSUMER_USAGE_VIDEO_ENCODER) {
       gr_format = HAL_PIXEL_FORMAT_NV12_ENCODEABLE;  // NV12
     } else if (cons_usage & GRALLOC1_CONSUMER_USAGE_CAMERA) {
@@ -294,10 +301,6 @@ void Allocator::GetIonHeapInfo(gralloc1_producer_usage_t prod_usage,
     heap_id |= ION_HEAP(ION_SYSTEM_HEAP_ID);
   }
 
-  if (prod_usage & GRALLOC1_PRODUCER_USAGE_PRIVATE_CAMERA_HEAP) {
-    heap_id |= ION_HEAP(ION_CAMERA_HEAP_ID);
-  }
-
   if (prod_usage & GRALLOC1_PRODUCER_USAGE_PRIVATE_ADSP_HEAP ||
       prod_usage & GRALLOC1_PRODUCER_USAGE_SENSOR_DIRECT_DATA) {
     heap_id |= ION_HEAP(ION_ADSP_HEAP_ID);
@@ -318,4 +321,4 @@ void Allocator::GetIonHeapInfo(gralloc1_producer_usage_t prod_usage,
 
   return;
 }
-}  // namespace gralloc
+}  // namespace gralloc1

@@ -32,11 +32,12 @@
 
 #include <media/msm_media_info.h>
 
-namespace gralloc {
+namespace gralloc1 {
 
 // Adreno Pixel Formats
 typedef enum {
   ADRENO_PIXELFORMAT_UNKNOWN = 0,
+  ADRENO_PIXELFORMAT_R16G16B16A16_FLOAT = 10,
   ADRENO_PIXELFORMAT_R10G10B10A2_UNORM = 24,  // Vertex, Normalized GL_UNSIGNED_INT_10_10_10_2_OES
   ADRENO_PIXELFORMAT_R8G8B8A8 = 28,
   ADRENO_PIXELFORMAT_R8G8B8A8_SRGB = 29,
@@ -66,7 +67,7 @@ typedef enum {
   ADRENO_PIXELFORMAT_NV21 = 619,
   ADRENO_PIXELFORMAT_Y8U8V8A8 = 620,  // YUV 4:4:4 packed (1 plane)
   ADRENO_PIXELFORMAT_Y8 = 625,        //  Single 8-bit luma only channel YUV format
-  ADRENO_PIXELFORMAT_TP10 = 648,      // YUV 4:2:0 planar 10 bits/comp (2 planes)
+  ADRENO_PIXELFORMAT_TP10 = 654,      // YUV 4:2:0 planar 10 bits/comp (2 planes)
 } ADRENOPIXELFORMAT;
 
 class AdrenoMemInfo {
@@ -130,6 +131,11 @@ class AdrenoMemInfo {
                                                        int tile_mode, int raster_mode,
                                                        int padding_threshold, int *aligned_w,
                                                        int *aligned_h) = NULL;
+  void (*LINK_adreno_compute_fmt_aligned_width_and_height)(int width, int height, int plane_id,
+                                                           int format, int num_samples,
+                                                           int tile_mode, int raster_mode,
+                                                           int padding_threshold, int *aligned_w,
+                                                           int *aligned_h) = NULL;
   void (*LINK_adreno_compute_compressedfmt_aligned_width_and_height)(
       int width, int height, int format, int tile_mode, int raster_mode, int padding_threshold,
       int *aligned_w, int *aligned_h, int *bpp) = NULL;
@@ -143,6 +149,6 @@ class AdrenoMemInfo {
   static AdrenoMemInfo *s_instance;
 };
 
-}  // namespace gralloc
+}  // namespace gralloc1
 
 #endif  // __GR_ADRENO_INFO_H__

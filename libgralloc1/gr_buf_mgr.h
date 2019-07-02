@@ -30,7 +30,7 @@
 #include "gr_allocator.h"
 #include "gr_buf_descriptor.h"
 
-namespace gralloc {
+namespace gralloc1 {
 
 class BufferManager {
  public:
@@ -73,8 +73,8 @@ class BufferManager {
   BufferManager();
   gralloc1_error_t MapBuffer(private_handle_t const *hnd);
   int GetBufferType(int format);
-  int AllocateBuffer(const BufferDescriptor &descriptor, buffer_handle_t *handle,
-                     unsigned int bufferSize = 0);
+  int AllocateBufferLocked(const BufferDescriptor &descriptor, buffer_handle_t *handle,
+                           unsigned int bufferSize = 0);
   uint32_t GetDataAlignment(int format, gralloc1_producer_usage_t prod_usage,
                        gralloc1_consumer_usage_t cons_usage);
   int GetHandleFlags(int format, gralloc1_producer_usage_t prod_usage,
@@ -130,6 +130,6 @@ class BufferManager {
   std::atomic<uint64_t> next_id_;
 };
 
-}  // namespace gralloc
+}  // namespace gralloc1
 
 #endif  // __GR_BUF_MGR_H__

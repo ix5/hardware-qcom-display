@@ -27,7 +27,10 @@
  * IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#include <log/log.h>
+#define ATRACE_TAG (ATRACE_TAG_GRAPHICS | ATRACE_TAG_HAL)
+#include <cutils/log.h>
+#include <utils/Trace.h>
+#include <cutils/trace.h>
 #include <sync/sync.h>
 #include <algorithm>
 #include <sstream>
@@ -62,8 +65,8 @@ struct gralloc_module_t HAL_MODULE_INFO_SYM = {
 
 int gralloc_device_open(const struct hw_module_t *module, const char *name, hw_device_t **device) {
   int status = -EINVAL;
-  if (!strcmp(name, GRALLOC_HARDWARE_MODULE_ID)) {
-    gralloc::GrallocImpl * /*gralloc1_device_t*/ dev = gralloc::GrallocImpl::GetInstance(module);
+  if (module && device && !strcmp(name, GRALLOC_HARDWARE_MODULE_ID)) {
+    gralloc1::GrallocImpl * /*gralloc1_device_t*/ dev = gralloc1::GrallocImpl::GetInstance(module);
     *device = reinterpret_cast<hw_device_t *>(dev);
     if (dev) {
       status = 0;
@@ -74,7 +77,7 @@ int gralloc_device_open(const struct hw_module_t *module, const char *name, hw_d
   return status;
 }
 
-namespace gralloc {
+namespace gralloc1 {
 
 GrallocImpl::GrallocImpl(const hw_module_t *module) {
   common.tag = HARDWARE_DEVICE_TAG;
@@ -102,7 +105,7 @@ int GrallocImpl::CloseDevice(hw_device_t *device __unused) {
 
 void GrallocImpl::GetCapabilities(struct gralloc1_device *device, uint32_t *out_count,
                                   int32_t  /*gralloc1_capability_t*/ *out_capabilities) {
-  if (device != nullptr) {
+  if (device != nullptr && out_count != nullptr) {
     if (out_capabilities != nullptr && *out_count >= 3) {
       out_capabilities[0] = GRALLOC1_CAPABILITY_TEST_ALLOCATE;
       out_capabilities[1] = GRALLOC1_CAPABILITY_LAYERED_BUFFERS;
@@ -175,7 +178,7 @@ gralloc1_function_pointer_t GrallocImpl::GetFunction(gralloc1_device_t *device, 
 
 gralloc1_error_t GrallocImpl::Dump(gralloc1_device_t *device, uint32_t *out_size,
                                    char *out_buffer) {
-  if (!device) {
+  if (!device || !out_size) {
     ALOGE("Gralloc Error : device=%p", (void *)device);
     return GRALLOC1_ERROR_BAD_DESCRIPTOR;
   }
@@ -210,7 +213,7 @@ gralloc1_error_t GrallocImpl::CheckDeviceAndHandle(gralloc1_device_t *device,
 
 gralloc1_error_t GrallocImpl::CreateBufferDescriptor(gralloc1_device_t *device,
                                                      gralloc1_buffer_descriptor_t *out_descriptor) {
-  if (!device) {
+  if (!device || !out_descriptor) {
     return GRALLOC1_ERROR_BAD_DESCRIPTOR;
   }
   GrallocImpl const *dev = GRALLOC_IMPL(device);
@@ -436,6 +439,7 @@ gralloc1_error_t GrallocImpl::LockBuffer(gralloc1_device_t *device, buffer_handl
                                          gralloc1_consumer_usage_t cons_usage,
                                          const gralloc1_rect_t *region, void **out_data,
                                          int32_t acquire_fence) {
+  ATRACE_CALL();
   gralloc1_error_t status = CheckDeviceAndHandle(device, buffer);
   if (status != GRALLOC1_ERROR_NONE || !out_data ||
       !region) {  // currently we ignore the region/rect client wants to lock
@@ -444,7 +448,9 @@ gralloc1_error_t GrallocImpl::LockBuffer(gralloc1_device_t *device, buffer_handl
   }
 
   if (acquire_fence > 0) {
+    ATRACE_BEGIN("fence wait");
     int error = sync_wait(acquire_fence, 1000);
+    ATRACE_END();
     CloseFdIfValid(acquire_fence);
     if (error < 0) {
       ALOGE("%s: sync_wait timedout! error = %s", __FUNCTION__, strerror(errno));
@@ -527,4 +533,4 @@ gralloc1_error_t GrallocImpl::Gralloc1Perform(gralloc1_device_t *device, int ope
   return err;
 }
 
-}  // namespace gralloc
+}  // namespace gralloc1

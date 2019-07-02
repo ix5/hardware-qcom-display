@@ -31,7 +31,7 @@
 #include "gr_buf_mgr.h"
 #include "qdMetaData.h"
 
-namespace gralloc {
+namespace gralloc1 {
 std::atomic<gralloc1_buffer_descriptor_t> BufferDescriptor::next_id_(1);
 
 static BufferInfo GetBufferInfo(const BufferDescriptor &descriptor) {
@@ -43,7 +43,7 @@ BufferManager::BufferManager() : next_id_(0) {
   char property[PROPERTY_VALUE_MAX];
 
   // Map framebuffer memory
-  if ((property_get(MAP_FB_MEMORY_PROP, property, NULL) > 0) &&
+  if ((property_get("debug.gralloc.map_fb_memory", property, NULL) > 0) &&
       (!strncmp(property, "1", PROPERTY_VALUE_MAX) ||
        (!strncasecmp(property, "true", PROPERTY_VALUE_MAX)))) {
     map_fb_mem_ = true;
@@ -124,7 +124,7 @@ gralloc1_error_t BufferManager::AllocateBuffers(uint32_t num_descriptors,
   std::lock_guard<std::mutex> buffer_lock(buffer_lock_);
   if (shared && (max_buf_index >= 0)) {
     // Allocate one and duplicate/copy the handles for each descriptor
-    if (AllocateBuffer(*descriptors[UINT(max_buf_index)], &out_buffers[max_buf_index])) {
+    if (AllocateBufferLocked(*descriptors[UINT(max_buf_index)], &out_buffers[max_buf_index])) {
       return GRALLOC1_ERROR_NO_RESOURCES;
     }
 
@@ -140,7 +140,7 @@ gralloc1_error_t BufferManager::AllocateBuffers(uint32_t num_descriptors,
     // Buffer sharing is not feasible.
     // Allocate separate buffer for each descriptor
     for (i = 0; i < num_descriptors; i++) {
-      if (AllocateBuffer(*descriptors[i], &out_buffers[i])) {
+      if (AllocateBufferLocked(*descriptors[i], &out_buffers[i])) {
         return GRALLOC1_ERROR_NO_RESOURCES;
       }
     }
@@ -321,20 +321,16 @@ gralloc1_error_t BufferManager::LockBuffer(const private_handle_t *hnd,
     err = MapBuffer(hnd);
   }
 
+  // Invalidate if CPU reads in software and there are non-CPU
+  // writers. No need to do this for the metadata buffer as it is
+  // only read/written in software.
+
   // todo use handle here
   if (!err && (hnd->flags & private_handle_t::PRIV_FLAGS_USES_ION) &&
       (hnd->flags & private_handle_t::PRIV_FLAGS_CACHED)) {
-
-    // Invalidate if CPU reads in software and there are non-CPU
-    // writers. No need to do this for the metadata buffer as it is
-    // only read/written in software.
-    if ((cons_usage & (GRALLOC1_CONSUMER_USAGE_CPU_READ | GRALLOC1_CONSUMER_USAGE_CPU_READ_OFTEN))
-       && (hnd->flags & private_handle_t::PRIV_FLAGS_NON_CPU_WRITER)) {
-      if (allocator_->CleanBuffer(reinterpret_cast<void *>(hnd->base), hnd->size, hnd->offset,
-                                  buf->ion_handle_main, CACHE_INVALIDATE, hnd->fd)) {
-
-         return GRALLOC1_ERROR_BAD_HANDLE;
-      }
+    if (allocator_->CleanBuffer(reinterpret_cast<void *>(hnd->base), hnd->size, hnd->offset,
+                                buf->ion_handle_main, CACHE_INVALIDATE, hnd->fd)) {
+      return GRALLOC1_ERROR_BAD_HANDLE;
     }
   }
 
@@ -391,14 +387,6 @@ uint32_t BufferManager::GetDataAlignment(int format, gralloc1_producer_usage_t p
 int BufferManager::GetHandleFlags(int format, gralloc1_producer_usage_t prod_usage,
                                   gralloc1_consumer_usage_t cons_usage) {
   int flags = 0;
-  if (cons_usage & GRALLOC1_CONSUMER_USAGE_PRIVATE_EXTERNAL_ONLY) {
-    flags |= private_handle_t::PRIV_FLAGS_EXTERNAL_ONLY;
-  }
-
-  if (cons_usage & GRALLOC1_CONSUMER_USAGE_PRIVATE_INTERNAL_ONLY) {
-    flags |= private_handle_t::PRIV_FLAGS_INTERNAL_ONLY;
-  }
-
   if (cons_usage & GRALLOC1_CONSUMER_USAGE_VIDEO_ENCODER) {
     flags |= private_handle_t::PRIV_FLAGS_VIDEO_ENCODER;
   }
@@ -459,22 +447,20 @@ int BufferManager::GetBufferType(int inputFormat) {
   return buffer_type;
 }
 
-int BufferManager::AllocateBuffer(const BufferDescriptor &descriptor, buffer_handle_t *handle,
-                                  unsigned int bufferSize) {
+int BufferManager::AllocateBufferLocked(const BufferDescriptor &descriptor, buffer_handle_t *handle,
+                                        unsigned int bufferSize) {
   if (!handle)
     return -EINVAL;
 
-  int format = descriptor.GetFormat();
   gralloc1_producer_usage_t prod_usage = descriptor.GetProducerUsage();
   gralloc1_consumer_usage_t cons_usage = descriptor.GetConsumerUsage();
+  int format = allocator_->GetImplDefinedFormat(prod_usage, cons_usage, descriptor.GetFormat());
   uint32_t layer_count = descriptor.GetLayerCount();
-
-  // Get implementation defined format
-  int gralloc_format = allocator_->GetImplDefinedFormat(prod_usage, cons_usage, format);
 
   unsigned int size;
   unsigned int alignedw, alignedh;
-  int buffer_type = GetBufferType(gralloc_format);
+
+  int buffer_type = GetBufferType(format);
   BufferInfo info = GetBufferInfo(descriptor);
   GetBufferSizeAndDimensions(info, &size, &alignedw, &alignedh);
   size = (bufferSize >= size) ? bufferSize : size;
@@ -628,12 +614,23 @@ gralloc1_error_t BufferManager::Perform(int operation, va_list args) {
       }
 
       BufferDim_t buffer_dim;
+      int interlaced = 0;
+
+      *stride = hnd->width;
+      *height = hnd->height;
       if (getMetaData(hnd, GET_BUFFER_GEOMETRY, &buffer_dim) == 0) {
         *stride = buffer_dim.sliceWidth;
         *height = buffer_dim.sliceHeight;
-      } else {
-        *stride = hnd->width;
-        *height = hnd->height;
+      } else if (getMetaData(hnd, GET_PP_PARAM_INTERLACED, &interlaced) == 0) {
+        if (interlaced && IsUBwcFormat(hnd->format)) {
+          unsigned int alignedw = 0, alignedh = 0;
+          // Get re-aligned height for single ubwc interlaced field and
+          // multiple by 2 to get frame height.
+          BufferInfo info(hnd->width, ((hnd->height+1)>>1), hnd->format);
+          GetAlignedWidthAndHeight(info, &alignedw, &alignedh);
+          *stride = static_cast<int>(alignedw);
+          *height = static_cast<int>(alignedh * 2);
+        }
       }
     } break;
 
@@ -676,6 +673,7 @@ gralloc1_error_t BufferManager::Perform(int operation, va_list args) {
       }
 
       *color_space = 0;
+#ifdef USE_COLOR_METADATA
       ColorMetaData color_metadata;
       if (getMetaData(hnd, GET_COLOR_METADATA, &color_metadata) == 0) {
         switch (color_metadata.colorPrimaries) {
@@ -697,6 +695,11 @@ gralloc1_error_t BufferManager::Perform(int operation, va_list args) {
       } else if (getMetaData(hnd, GET_COLOR_SPACE, color_space) != 0) {
           *color_space = 0;
       }
+#else
+      if (getMetaData(hnd, GET_COLOR_SPACE, color_space) != 0) {
+          *color_space = 0;
+      }
+#endif
     } break;
     case GRALLOC_MODULE_PERFORM_GET_YUV_PLANE_INFO: {
       private_handle_t *hnd = va_arg(args, private_handle_t *);
@@ -726,7 +729,7 @@ gralloc1_error_t BufferManager::Perform(int operation, va_list args) {
         return GRALLOC1_ERROR_BAD_VALUE;
       }
 
-      if (getMetaData(hnd, GET_MAP_SECURE_BUFFER, map_secure_buffer) == 0) {
+      if (getMetaData(hnd, GET_MAP_SECURE_BUFFER, map_secure_buffer) != 0) {
         *map_secure_buffer = 0;
       }
     } break;
@@ -792,23 +795,6 @@ gralloc1_error_t BufferManager::Perform(int operation, va_list args) {
       *size = ALIGN(*size, align);
     } break;
 
-    case GRALLOC1_MODULE_PERFORM_ALLOCATE_BUFFER: {
-      std::lock_guard<std::mutex> lock(buffer_lock_);
-      int width = va_arg(args, int);
-      int height = va_arg(args, int);
-      int format = va_arg(args, int);
-      uint64_t p_usage = va_arg(args, uint64_t);
-      uint64_t c_usage = va_arg(args, uint64_t);
-      buffer_handle_t *hnd = va_arg(args, buffer_handle_t*);
-      gralloc1_producer_usage_t producer_usage = static_cast<gralloc1_producer_usage_t>(p_usage);
-      gralloc1_consumer_usage_t consumer_usage = static_cast<gralloc1_consumer_usage_t>(c_usage);
-      BufferDescriptor descriptor(width, height, format, producer_usage, consumer_usage);
-      unsigned int size;
-      unsigned int alignedw, alignedh;
-      GetBufferSizeAndDimensions(GetBufferInfo(descriptor), &size, &alignedw, &alignedh);
-      AllocateBuffer(descriptor, hnd, size);
-    } break;
-
     case GRALLOC1_MODULE_PERFORM_GET_INTERLACE_FLAG: {
       private_handle_t *hnd = va_arg(args, private_handle_t *);
       int *flag = va_arg(args, int *);
@@ -826,33 +812,21 @@ gralloc1_error_t BufferManager::Perform(int operation, va_list args) {
       }
     } break;
 
+    case GRALLOC_MODULE_PERFORM_SET_SINGLE_BUFFER_MODE: {
+      private_handle_t* hnd =  va_arg(args, private_handle_t*);
+      uint32_t *enable = va_arg(args, uint32_t*);
+      if (private_handle_t::validate(hnd) != 0) {
+        return GRALLOC1_ERROR_BAD_HANDLE;
+      }
+      if (setMetaData(hnd, SET_SINGLE_BUFFER_MODE, enable) != 0) {
+        return GRALLOC1_ERROR_UNSUPPORTED;
+      }
+    } break;
+
     default:
       break;
   }
   return GRALLOC1_ERROR_NONE;
-}
-
-static bool IsYuvFormat(const private_handle_t *hnd) {
-  switch (hnd->format) {
-    case HAL_PIXEL_FORMAT_YCbCr_420_SP:
-    case HAL_PIXEL_FORMAT_YCbCr_422_SP:
-    case HAL_PIXEL_FORMAT_YCbCr_420_SP_VENUS:
-    case HAL_PIXEL_FORMAT_NV12_ENCODEABLE:   // Same as YCbCr_420_SP_VENUS
-    case HAL_PIXEL_FORMAT_YCbCr_420_SP_VENUS_UBWC:
-    case HAL_PIXEL_FORMAT_YCrCb_420_SP:
-    case HAL_PIXEL_FORMAT_YCrCb_422_SP:
-    case HAL_PIXEL_FORMAT_YCrCb_420_SP_ADRENO:
-    case HAL_PIXEL_FORMAT_NV21_ZSL:
-    case HAL_PIXEL_FORMAT_RAW16:
-    case HAL_PIXEL_FORMAT_Y16:
-    case HAL_PIXEL_FORMAT_RAW12:
-    case HAL_PIXEL_FORMAT_RAW10:
-    case HAL_PIXEL_FORMAT_YV12:
-    case HAL_PIXEL_FORMAT_Y8:
-      return true;
-    default:
-      return false;
-  }
 }
 
 gralloc1_error_t BufferManager::GetNumFlexPlanes(const private_handle_t *hnd,
@@ -871,8 +845,8 @@ gralloc1_error_t BufferManager::GetFlexLayout(const private_handle_t *hnd,
     return GRALLOC1_ERROR_UNSUPPORTED;
   }
 
-  android_ycbcr ycbcr;
-  int err = GetYUVPlaneInfo(hnd, &ycbcr);
+  android_ycbcr yuvPlaneInfo[2];
+  int err = GetYUVPlaneInfo(hnd, yuvPlaneInfo);
 
   if (err != 0) {
     return GRALLOC1_ERROR_BAD_HANDLE;
@@ -890,6 +864,8 @@ gralloc1_error_t BufferManager::GetFlexLayout(const private_handle_t *hnd,
     layout->planes[i].v_subsampling = 2;
   }
 
+  // We are only returning flex layout for progressive or single field formats.
+  struct android_ycbcr ycbcr = yuvPlaneInfo[0];
   layout->planes[0].top_left = static_cast<uint8_t *>(ycbcr.y);
   layout->planes[0].component = FLEX_COMPONENT_Y;
   layout->planes[0].v_increment = static_cast<int32_t>(ycbcr.ystride);
@@ -927,4 +903,4 @@ gralloc1_error_t BufferManager::Dump(std::ostringstream *os) {
   }
   return GRALLOC1_ERROR_NONE;
 }
-}  //  namespace gralloc
+}  //  namespace gralloc1

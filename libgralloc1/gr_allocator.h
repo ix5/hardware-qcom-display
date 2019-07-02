@@ -27,60 +27,49 @@
  * IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#ifndef __GR_ION_ALLOC_H__
-#define __GR_ION_ALLOC_H__
+#ifndef __GR_ALLOCATOR_H__
+#define __GR_ALLOCATOR_H__
 
-#include <linux/msm_ion.h>
-
-#define FD_INIT -1
-
-namespace gralloc {
-
-enum {
-  CACHE_CLEAN = 0x1,
-  CACHE_INVALIDATE,
-  CACHE_CLEAN_AND_INVALIDATE,
-};
-
-struct AllocData {
-  void *base = NULL;
-  int fd = -1;
-  int ion_handle = -1;
-  unsigned int offset = 0;
-  unsigned int size = 0;
-  unsigned int align = 1;
-  uintptr_t handle = 0;
-  bool uncached = false;
-  unsigned int flags = 0x0;
-  unsigned int heap_id = 0x0;
-  unsigned int alloc_type = 0x0;
-};
-
-class IonAlloc {
- public:
-  IonAlloc() { ion_dev_fd_ = FD_INIT; }
-
-  ~IonAlloc() { CloseIonDevice(); }
-
-  bool Init();
-  int AllocBuffer(AllocData *data);
-  int FreeBuffer(void *base, unsigned int size, unsigned int offset, int fd, int ion_handle);
-  int MapBuffer(void **base, unsigned int size, unsigned int offset, int fd);
-  int ImportBuffer(int fd);
-  int UnmapBuffer(void *base, unsigned int size, unsigned int offset);
-  int CleanBuffer(void *base, unsigned int size, unsigned int offset, int handle, int op, int fd);
-
- private:
-#ifndef TARGET_ION_ABI_VERSION
-  const char *kIonDevice = "/dev/ion";
+#ifdef MASTER_SIDE_CP
+#define SECURE_ALIGN SZ_4K
+#else
+#define SECURE_ALIGN SZ_1M
 #endif
 
-  int OpenIonDevice();
-  void CloseIonDevice();
+#include <vector>
 
-  int ion_dev_fd_;
+#include "gralloc_priv.h"
+#include "gr_buf_descriptor.h"
+#include "gr_ion_alloc.h"
+
+namespace gralloc1 {
+
+class Allocator {
+ public:
+  Allocator();
+  ~Allocator();
+  bool Init();
+  int MapBuffer(void **base, unsigned int size, unsigned int offset, int fd);
+  int ImportBuffer(int fd);
+  int FreeBuffer(void *base, unsigned int size, unsigned int offset, int fd, int handle);
+  int CleanBuffer(void *base, unsigned int size, unsigned int offset, int handle, int op, int fd);
+  int AllocateMem(AllocData *data, gralloc1_producer_usage_t prod_usage,
+                  gralloc1_consumer_usage_t cons_usage);
+  // @return : index of the descriptor with maximum buffer size req
+  bool CheckForBufferSharing(uint32_t num_descriptors,
+                             const std::vector<std::shared_ptr<BufferDescriptor>>& descriptors,
+                             ssize_t *max_index);
+  int GetImplDefinedFormat(gralloc1_producer_usage_t prod_usage,
+                           gralloc1_consumer_usage_t cons_usage, int format);
+  bool UseUncached(gralloc1_producer_usage_t prod_usage, gralloc1_consumer_usage_t cons_usage);
+
+ private:
+  void GetIonHeapInfo(gralloc1_producer_usage_t prod_usage, gralloc1_consumer_usage_t cons_usage,
+                      unsigned int *ion_heap_id, unsigned int *alloc_type, unsigned int *ion_flags);
+
+  IonAlloc *ion_allocator_ = NULL;
 };
 
-}  // namespace gralloc
+}  // namespace gralloc1
 
-#endif  // __GR_ION_ALLOC_H__
+#endif  // __GR_ALLOCATOR_H__
